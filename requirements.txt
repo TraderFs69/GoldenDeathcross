@@ -3,3 +3,4 @@ streamlit
 pandas
 yfinance
 plotly
+lxml
