@@ -16,109 +16,122 @@ def get_sp500_tickers():
     """
     Renvoie la liste des tickers S&P 500 au format Yahoo (BRK.B -> BRK-B).
     Ordre de priorité :
-      1) Fichier local sp500_constituents.xlsx ou .csv (colonne 'Symbol')
+      1) Fichier local sp500_constituents.xlsx ou sp500_constituents.csv
       2) Wikipedia (2 URLs)
       3) Slickcharts (fallback)
     """
-    # 1) Fichier local (comme dans tes autres projets)
-    for path in ["sp500_constituents.xlsx", "sp500_constituents.csv"]:
+    # ---------------------------------------------------------------
+    # 1) Fichiers locaux
+    # ---------------------------------------------------------------
+    local_files = ["sp500_constituents.xlsx", "sp500_constituents.csv"]
+
+    for path in local_files:
         if os.path.exists(path):
             try:
                 if path.endswith(".xlsx"):
                     df = pd.read_excel(path)
                 else:
                     df = pd.read_csv(path)
+
                 if "Symbol" not in df.columns:
                     st.warning(f"Fichier {path} trouvé mais sans colonne 'Symbol'. Ignoré.")
                     continue
+
                 symbols = (
                     df["Symbol"]
-                    .astype("string")
+                    .astype(str)
                     .str.strip()
                     .dropna()
                     .tolist()
                 )
-                # Format Yahoo
-                symbols = [s.replace(".", "-") for s in symbols]
-                symbols = sorted(set([s for s in symbols if s and s != "nan"]))
+
+                symbols = [s.replace(".", "-") for s in symbols]  # Format Yahoo
+                symbols = sorted(set([s for s in symbols if s]))
+
                 st.info(f"S&P 500 chargé depuis {path} ({len(symbols)} tickers).")
                 return symbols
-            except Exception as e:
-                st.warning(f"Erreur en lisant {path} : {e}. On tente les sources en ligne…")
-                break
 
-    # 2) Wikipedia
+            except Exception as e:
+                st.warning(f"Erreur lors de la lecture de {path} : {e}")
+                continue
+
+    # ---------------------------------------------------------------
+    # 2) Wikipedia (2 URL, parsing robuste)
+    # ---------------------------------------------------------------
     wiki_urls = [
         "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies?action=render",
         "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
     ]
+
     headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml",
-        "Referer": "https://en.wikipedia.org/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/118.0.0.0 Safari/537.36"
+        )
     }
 
-    def extract_symbols_from_tables(tables: list[pd.DataFrame]) -> list[str] | None:
+    def extract_symbols(tables):
+        """Cherche une colonne contenant 'Symbol'."""
         for df in tables:
-            cols = [str(c).strip() for c in df.columns]
-            if any(re.search(r"\bSymbol\b", c, flags=re.I) for c in cols):
-                sym_col = [c for c in df.columns if re.search(r"\bSymbol\b", str(c), re.I)][0]
-                symbols = (
-                    df[sym_col]
-                    .astype("string")
-                    .str.strip()
-                    .dropna()
-                    .tolist()
-                )
-                return symbols
+            for col in df.columns:
+                if re.search(r"symbol", str(col), re.I):
+                    syms = (
+                        df[col]
+                        .astype(str)
+                        .str.strip()
+                        .dropna()
+                        .tolist()
+                    )
+                    return syms
         return None
 
     for url in wiki_urls:
         try:
-            r = requests.get(url, headers=headers, timeout=25)
+            r = requests.get(url, headers=headers, timeout=20)
             r.raise_for_status()
-            tables = pd.read_html(r.text, flavor="lxml")
-            symbols = extract_symbols_from_tables(tables)
+            tables = pd.read_html(r.text)
+
+            symbols = extract_symbols(tables)
             if symbols:
-                symbols = [s.replace(".", "-") for s in symbols]  # format Yahoo
-                symbols = sorted(set([s for s in symbols if s and s != "nan"]))
+                symbols = [s.replace(".", "-") for s in symbols]
+                symbols = sorted(set([s for s in symbols if s]))
                 st.info(f"S&P 500 chargé depuis Wikipedia ({len(symbols)} tickers).")
                 return symbols
-        except Exception as e:
-            st.warning(f"Échec Wikipedia ({url}) : {e}. On tente une autre source…")
 
-    # 3) Slickcharts (fallback)
+        except Exception as e:
+            st.warning(f"Wikipedia en échec ({url}) : {e}")
+
+    # ---------------------------------------------------------------
+    # 3) Slickcharts (fallback béton)
+    # ---------------------------------------------------------------
     try:
-        sc_headers = headers | {"Referer": "https://www.slickcharts.com/sp500"}
-        sc = requests.get("https://www.slickcharts.com/sp500", headers=sc_headers, timeout=20)
+        sc = requests.get("https://www.slickcharts.com/sp500", headers=headers, timeout=20)
         sc.raise_for_status()
         tables = pd.read_html(sc.text)
-        symbols = None
+
         for df in tables:
             if "Symbol" in df.columns:
                 symbols = (
                     df["Symbol"]
-                    .astype("string")
+                    .astype(str)
                     .str.strip()
                     .dropna()
                     .tolist()
                 )
-                break
-        if symbols:
-            symbols = [s.replace(".", "-") for s in symbols]
-            symbols = sorted(set([s for s in symbols if s and s != "nan"]))
-            st.info(f"S&P 500 chargé depuis Slickcharts ({len(symbols)} tickers).")
-            return symbols
+                symbols = [s.replace(".", "-") for s in symbols]
+                symbols = sorted(set(symbols))
+                st.info(f"S&P 500 chargé depuis Slickcharts ({len(symbols)} tickers).")
+                return symbols
+
     except Exception as e:
-        st.error(f"Échec Slickcharts : {e}")
+        st.error(f"Erreur Slickcharts : {e}")
 
-    # Si tout échoue
-    st.error("Impossible de récupérer la liste S&P 500 (fichier local / Wikipedia / Slickcharts).")
+    # ---------------------------------------------------------------
+    # Rien trouvé
+    # ---------------------------------------------------------------
+    st.error("❌ Impossible de récupérer la liste S&P 500 depuis toutes les sources.")
     return []
-
 @st.cache_data
 def download_data(ticker):
     df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False, group_by="column")
