@@ -212,16 +212,22 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
             if ma200 == 0:
                 continue
             ecart = abs(ma50 - ma200) / ma200 * 100
-            if ecart <= seuil:
-                tendance = "Golden Cross imminent" if ma50 < ma200 else "Death Cross imminent"
-               detected.append({
-    "Ticker": ticker,
-    "Prix": round(last["Close"], 2),
-    f"{ma_type}50": round(ma50, 2),
-    f"{ma_type}200": round(ma200, 2),
-    "Ecart(%)": round(ecart, 2),
-    "Signal": tendance
-})
+                        if ecart <= seuil:
+                tendance = (
+                    "Golden Cross imminent"
+                    if ma50 < ma200
+                    else "Death Cross imminent"
+                )
+
+                detected.append({
+                    "Ticker": ticker,
+                    "Prix": round(last["Close"], 2),
+                    f"{ma_type}50": round(ma50, 2),
+                    f"{ma_type}200": round(ma200, 2),
+                    "Ecart(%)": round(ecart, 2),
+                    "Signal": tendance
+                })
+
 
     if detected:
         df_res = pd.DataFrame(detected).sort_values("Ecart(%)")
