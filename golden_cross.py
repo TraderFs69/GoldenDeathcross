@@ -1,123 +1,100 @@
 import os
 import re
 import requests
+import time
 
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
 
 # ==============================
-# Config Streamlit
+# CONFIG STREAMLIT
 # ==============================
 st.set_page_config(
-    page_title="S&P 500 Golden/Death Cross Scanner",
+    page_title="S&P 500 Golden / Death Cross Scanner",
     layout="wide"
 )
-st.title("📈 Scanner S&P 500 : Golden & Death Cross (SMA/EMA)")
 
-st.sidebar.header("Configuration")
-seuil = st.sidebar.slider(
-    "Seuil d'écart (%) pour signaler un croisement imminent",
-    0.1, 5.0, 1.0, step=0.1
-)
-ma_type = st.sidebar.selectbox("Type de moyenne mobile :", ["SMA", "EMA"])
+st.title("📈 Scanner S&P 500 – Golden & Death Cross (Polygon)")
+
+API_KEY = st.secrets["POLYGON_API_KEY"]
 
 # ==============================
-# Récupération S&P 500
+# SIDEBAR
+# ==============================
+st.sidebar.header("Configuration")
+
+seuil = st.sidebar.slider(
+    "Seuil d'écart (%) pour croisement imminent",
+    0.1, 5.0, 1.0, step=0.1
+)
+
+ma_type = st.sidebar.selectbox(
+    "Type de moyenne mobile",
+    ["SMA", "EMA"]
+)
+
+max_tickers = st.sidebar.number_input(
+    "Nombre max de tickers analysés",
+    min_value=20,
+    max_value=500,
+    value=150,
+    step=10
+)
+
+# ==============================
+# S&P 500 TICKERS
 # ==============================
 @st.cache_data
 def get_sp500_tickers():
-    local_files = ["sp500_constituents.xlsx", "sp500_constituents.csv"]
-
-    for path in local_files:
-        if os.path.exists(path):
-            try:
-                df = pd.read_excel(path) if path.endswith(".xlsx") else pd.read_csv(path)
-                if "Symbol" not in df.columns:
-                    continue
-                symbols = (
-                    df["Symbol"]
-                    .astype(str)
-                    .str.strip()
-                    .dropna()
-                    .tolist()
-                )
-                symbols = [s.replace(".", "-") for s in symbols]
-                return sorted(set(symbols))
-            except Exception:
-                pass
-
-    wiki_urls = [
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies?action=render",
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-    ]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    for url in wiki_urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            r.raise_for_status()
-            tables = pd.read_html(r.text)
-            for df in tables:
-                for col in df.columns:
-                    if re.search("symbol", str(col), re.I):
-                        symbols = (
-                            df[col]
-                            .astype(str)
-                            .str.strip()
-                            .dropna()
-                            .tolist()
-                        )
-                        symbols = [s.replace(".", "-") for s in symbols]
-                        return sorted(set(symbols))
-        except Exception:
-            pass
-
-    try:
-        sc = requests.get("https://www.slickcharts.com/sp500", headers=headers, timeout=20)
-        sc.raise_for_status()
-        tables = pd.read_html(sc.text)
-        for df in tables:
-            if "Symbol" in df.columns:
-                symbols = (
-                    df["Symbol"]
-                    .astype(str)
-                    .str.strip()
-                    .dropna()
-                    .tolist()
-                )
-                symbols = [s.replace(".", "-") for s in symbols]
-                return sorted(set(symbols))
-    except Exception:
-        pass
-
-    return []
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url)
+    df = tables[0]
+    symbols = df["Symbol"].astype(str).str.replace(".", "-", regex=False)
+    return sorted(symbols.tolist())
 
 # ==============================
-# Téléchargement Yahoo
+# POLYGON DATA
 # ==============================
-@st.cache_data
-def download_data(ticker):
-    df = yf.download(
-        ticker,
-        period="1y",
-        interval="1d",
-        progress=False,
-        auto_adjust=False
+@st.cache_data(ttl=3600)
+def get_polygon_data(ticker):
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/"
+        f"2023-01-01/2026-01-01"
+        f"?adjusted=true&sort=asc&limit=50000&apiKey={API_KEY}"
     )
-    if df is None or df.empty:
+
+    r = requests.get(url, timeout=15)
+
+    if r.status_code != 200:
         return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna(subset=["Close"])
+
+    data = r.json()
+    if "results" not in data:
+        return None
+
+    df = pd.DataFrame(data["results"])
+    if df.empty:
+        return None
+
+    df["Date"] = pd.to_datetime(df["t"], unit="ms")
+    df.set_index("Date", inplace=True)
+
+    df.rename(
+        columns={
+            "c": "Close",
+            "o": "Open",
+            "h": "High",
+            "l": "Low",
+            "v": "Volume"
+        },
+        inplace=True
+    )
+
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
 # ==============================
-# Calcul des MAs
+# CALCUL DES MOYENNES
 # ==============================
 def calculate_mas(df, ma_type):
     if ma_type == "SMA":
@@ -129,35 +106,28 @@ def calculate_mas(df, ma_type):
     return df
 
 # ==============================
-# Logique principale
+# MAIN
 # ==============================
 if st.sidebar.button("🚦 Lancer l'analyse"):
-    tickers = get_sp500_tickers()
 
-    if not tickers:
-        st.error("Aucun ticker S&P 500 disponible.")
-        st.stop()
-
-    max_tickers = st.sidebar.number_input(
-        "Nombre maximum de tickers à analyser",
-        min_value=10,
-        max_value=len(tickers),
-        value=min(150, len(tickers)),
-        step=10
-    )
-    tickers = tickers[:int(max_tickers)]
-
+    tickers = get_sp500_tickers()[:int(max_tickers)]
     detected = []
 
-    with st.spinner(f"Analyse de {len(tickers)} tickers en {ma_type}..."):
+    with st.spinner(f"Analyse de {len(tickers)} tickers via Polygon..."):
+
         for ticker in tickers:
-            df = download_data(ticker)
+            df = get_polygon_data(ticker)
+
             if df is None or len(df) < 200:
                 continue
 
             df = calculate_mas(df, ma_type)
-            last = df.dropna().iloc[-1]
+            df = df.dropna()
 
+            if df.empty:
+                continue
+
+            last = df.iloc[-1]
             ma50 = last["MA50"]
             ma200 = last["MA200"]
 
@@ -167,7 +137,7 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
             ecart = abs(ma50 - ma200) / ma200 * 100
 
             if ecart <= seuil:
-                tendance = (
+                signal = (
                     "Golden Cross imminent"
                     if ma50 < ma200
                     else "Death Cross imminent"
@@ -178,31 +148,33 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
                     "Prix": round(last["Close"], 2),
                     f"{ma_type}50": round(ma50, 2),
                     f"{ma_type}200": round(ma200, 2),
-                    "Ecart(%)": round(ecart, 2),
-                    "Signal": tendance
+                    "Écart (%)": round(ecart, 2),
+                    "Signal": signal
                 })
 
+            time.sleep(0.05)  # anti-rate-limit Polygon
+
     if detected:
-        df_res = pd.DataFrame(detected).sort_values("Ecart(%)")
-        st.success(f"{len(df_res)} signaux détectés.")
+        df_res = pd.DataFrame(detected).sort_values("Écart (%)")
+        st.success(f"{len(df_res)} signaux détectés")
         st.dataframe(df_res, use_container_width=True)
 
         ticker_choice = st.selectbox(
-            "📌 Sélectionne un ticker à afficher :",
+            "📌 Sélectionne un ticker",
             df_res["Ticker"]
         )
 
         if ticker_choice:
-            df_sel = download_data(ticker_choice)
-            df_sel = calculate_mas(df_sel, ma_type).dropna()
+            df_plot = get_polygon_data(ticker_choice)
+            df_plot = calculate_mas(df_plot, ma_type).dropna()
 
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df_sel.index, y=df_sel["Close"], name="Close"))
-            fig.add_trace(go.Scatter(x=df_sel.index, y=df_sel["MA50"], name=f"{ma_type}50"))
-            fig.add_trace(go.Scatter(x=df_sel.index, y=df_sel["MA200"], name=f"{ma_type}200"))
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["Close"], name="Close"))
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA50"], name=f"{ma_type}50"))
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], name=f"{ma_type}200"))
 
             fig.update_layout(
-                title=f"{ticker_choice} – {ma_type}",
+                title=f"{ticker_choice} – {ma_type} Cross",
                 xaxis_title="Date",
                 yaxis_title="Prix"
             )
@@ -210,7 +182,7 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
             st.plotly_chart(fig, use_container_width=True)
 
     else:
-        st.warning(f"Aucun signal trouvé avec un seuil de {seuil}%.")
+        st.warning("Aucun signal détecté avec ce seuil.")
 
 else:
-    st.info("Clique sur le bouton dans la barre latérale pour lancer l'analyse.")
+    st.info("👈 Configure et lance l’analyse depuis la barre latérale.")
