@@ -1,5 +1,6 @@
 import os
 import time
+import io
 import requests
 import streamlit as st
 import pandas as pd
@@ -46,7 +47,7 @@ def get_russell3000_tickers():
     file_path = "russell3000_constituents.xlsx"
 
     if not os.path.exists(file_path):
-        st.error("❌ Fichier Russell 3000 introuvable.")
+        st.error("❌ Fichier russell3000_constituents.xlsx introuvable.")
         return []
 
     df = pd.read_excel(file_path)
@@ -65,7 +66,7 @@ def get_russell3000_tickers():
             )
             return sorted(tickers)
 
-    st.error("❌ Aucune colonne Ticker/Symbol trouvée.")
+    st.error("❌ Aucune colonne Ticker/Symbol trouvée dans le fichier.")
     return []
 
 # ==================================================
@@ -120,36 +121,44 @@ def calculate_mas(df, ma_type):
     return df
 
 # ==================================================
-# DISCORD ALERT GROUPÉE
+# DISCORD – ALERTE GROUPÉE + CSV
 # ==================================================
 def send_grouped_discord_alert(results, ma_type, seuil):
     if not results:
         return
 
-    header = (
+    df = pd.DataFrame(results)
+
+    summary = (
         f"📊 **Russell 3000 – Scan terminé**\n"
         f"Type: {ma_type} | Seuil: {seuil}%\n"
-        f"Signaux détectés: {len(results)}\n\n"
+        f"Signaux détectés: **{len(df)}**\n\n"
+        f"📎 Fichier CSV joint (prix, moyennes, écart, signal)"
     )
 
-    lines = []
-    for r in results[:25]:  # limite Discord
-        lines.append(
-            f"**{r['Ticker']}** – {r['Signal']} "
-            f"(Écart {r['Écart (%)']}%)"
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+
+    files = {
+        "file": (
+            "russell3000_signaux.csv",
+            csv_buffer.getvalue(),
+            "text/csv"
         )
+    }
 
-    message = header + "\n".join(lines)
-
-    if len(results) > 25:
-        message += f"\n\n➕ {len(results) - 25} autres signaux non affichés"
-
-    payload = {"content": message}
+    payload = {"content": summary}
 
     try:
-        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-    except Exception:
-        pass
+        requests.post(
+            DISCORD_WEBHOOK,
+            data=payload,
+            files=files,
+            timeout=15
+        )
+    except Exception as e:
+        st.warning(f"Erreur Discord : {e}")
 
 # ==================================================
 # MAIN
@@ -206,17 +215,17 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
                 })
 
             progress.progress((i + 1) / total)
-            time.sleep(0.05)
+            time.sleep(0.05)  # anti rate-limit Polygon
 
-    # ==================================================
-    # DISCORD GROUPÉ
-    # ==================================================
+    # ==============================
+    # DISCORD
+    # ==============================
     if send_discord_alerts:
         send_grouped_discord_alert(detected, ma_type, seuil)
 
-    # ==================================================
-    # AFFICHAGE
-    # ==================================================
+    # ==============================
+    # AFFICHAGE STREAMLIT
+    # ==============================
     if detected:
         df_res = pd.DataFrame(detected).sort_values("Écart (%)")
         st.success(f"{len(df_res)} signaux détectés")
@@ -248,4 +257,4 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
         st.warning("Aucun signal détecté avec ce seuil.")
 
 else:
-    st.info("👈 Lance le scanner depuis la barre latérale.")
+    st.info("👈 Configure les paramètres et lance le scan depuis la barre latérale.")
