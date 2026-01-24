@@ -43,7 +43,7 @@ send_discord_alerts = st.sidebar.checkbox(
 # ==================================================
 @st.cache_data
 def get_russell3000_tickers():
-    file_path = "/mnt/data/russell3000_constituents.xlsx"
+    file_path = "/mnt/data/"russell3000_constituents.xlsx""
 
     if not os.path.exists(file_path):
         st.error("❌ Fichier Russell 3000 introuvable.")
