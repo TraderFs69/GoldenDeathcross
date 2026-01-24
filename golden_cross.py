@@ -1,27 +1,26 @@
 import os
-import re
-import requests
 import time
-
+import requests
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# ==============================
+# ==================================================
 # CONFIG STREAMLIT
-# ==============================
+# ==================================================
 st.set_page_config(
-    page_title="S&P 500 Golden / Death Cross Scanner",
+    page_title="Russell 3000 – Golden / Death Cross Scanner",
     layout="wide"
 )
 
-st.title("📈 Scanner S&P 500 – Golden & Death Cross (Polygon)")
+st.title("📈 Russell 3000 – Golden & Death Cross Scanner (Polygon)")
 
 API_KEY = st.secrets["POLYGON_API_KEY"]
+DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 
-# ==============================
+# ==================================================
 # SIDEBAR
-# ==============================
+# ==================================================
 st.sidebar.header("Configuration")
 
 seuil = st.sidebar.slider(
@@ -34,28 +33,44 @@ ma_type = st.sidebar.selectbox(
     ["SMA", "EMA"]
 )
 
-max_tickers = st.sidebar.number_input(
-    "Nombre max de tickers analysés",
-    min_value=20,
-    max_value=500,
-    value=150,
-    step=10
+send_discord_alerts = st.sidebar.checkbox(
+    "📣 Envoyer une alerte Discord groupée",
+    value=True
 )
 
-# ==============================
-# S&P 500 TICKERS
-# ==============================
+# ==================================================
+# TICKERS RUSSELL 3000 (EXCEL)
+# ==================================================
 @st.cache_data
-def get_sp500_tickers():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
-    df = tables[0]
-    symbols = df["Symbol"].astype(str).str.replace(".", "-", regex=False)
-    return sorted(symbols.tolist())
+def get_russell3000_tickers():
+    file_path = "/mnt/data/russell3000_constituents.xlsx"
 
-# ==============================
+    if not os.path.exists(file_path):
+        st.error("❌ Fichier Russell 3000 introuvable.")
+        return []
+
+    df = pd.read_excel(file_path)
+
+    for col in df.columns:
+        if col.lower() in ["ticker", "symbol", "tickers", "symbols"]:
+            tickers = (
+                df[col]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .str.replace(".", "-", regex=False)
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            return sorted(tickers)
+
+    st.error("❌ Aucune colonne Ticker/Symbol trouvée.")
+    return []
+
+# ==================================================
 # POLYGON DATA
-# ==============================
+# ==================================================
 @st.cache_data(ttl=3600)
 def get_polygon_data(ticker):
     url = (
@@ -65,7 +80,6 @@ def get_polygon_data(ticker):
     )
 
     r = requests.get(url, timeout=15)
-
     if r.status_code != 200:
         return None
 
@@ -82,10 +96,10 @@ def get_polygon_data(ticker):
 
     df.rename(
         columns={
-            "c": "Close",
             "o": "Open",
             "h": "High",
             "l": "Low",
+            "c": "Close",
             "v": "Volume"
         },
         inplace=True
@@ -93,9 +107,9 @@ def get_polygon_data(ticker):
 
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
-# ==============================
-# CALCUL DES MOYENNES
-# ==============================
+# ==================================================
+# MOYENNES MOBILES
+# ==================================================
 def calculate_mas(df, ma_type):
     if ma_type == "SMA":
         df["MA50"] = df["Close"].rolling(50).mean()
@@ -105,26 +119,64 @@ def calculate_mas(df, ma_type):
         df["MA200"] = df["Close"].ewm(span=200, adjust=False).mean()
     return df
 
-# ==============================
+# ==================================================
+# DISCORD ALERT GROUPÉE
+# ==================================================
+def send_grouped_discord_alert(results, ma_type, seuil):
+    if not results:
+        return
+
+    header = (
+        f"📊 **Russell 3000 – Scan terminé**\n"
+        f"Type: {ma_type} | Seuil: {seuil}%\n"
+        f"Signaux détectés: {len(results)}\n\n"
+    )
+
+    lines = []
+    for r in results[:25]:  # limite Discord
+        lines.append(
+            f"**{r['Ticker']}** – {r['Signal']} "
+            f"(Écart {r['Écart (%)']}%)"
+        )
+
+    message = header + "\n".join(lines)
+
+    if len(results) > 25:
+        message += f"\n\n➕ {len(results) - 25} autres signaux non affichés"
+
+    payload = {"content": message}
+
+    try:
+        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+    except Exception:
+        pass
+
+# ==================================================
 # MAIN
-# ==============================
+# ==================================================
 if st.sidebar.button("🚦 Lancer l'analyse"):
 
-    tickers = get_sp500_tickers()[:int(max_tickers)]
+    tickers = get_russell3000_tickers()
+    if not tickers:
+        st.stop()
+
     detected = []
 
-    with st.spinner(f"Analyse de {len(tickers)} tickers via Polygon..."):
+    progress = st.progress(0)
+    total = len(tickers)
 
-        for ticker in tickers:
+    with st.spinner(f"Analyse de {total} actions du Russell 3000..."):
+
+        for i, ticker in enumerate(tickers):
+
             df = get_polygon_data(ticker)
-
             if df is None or len(df) < 200:
+                progress.progress((i + 1) / total)
                 continue
 
-            df = calculate_mas(df, ma_type)
-            df = df.dropna()
-
+            df = calculate_mas(df, ma_type).dropna()
             if df.empty:
+                progress.progress((i + 1) / total)
                 continue
 
             last = df.iloc[-1]
@@ -132,15 +184,16 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
             ma200 = last["MA200"]
 
             if ma200 == 0:
+                progress.progress((i + 1) / total)
                 continue
 
             ecart = abs(ma50 - ma200) / ma200 * 100
 
             if ecart <= seuil:
                 signal = (
-                    "Golden Cross imminent"
+                    "🟢 Golden Cross imminent"
                     if ma50 < ma200
-                    else "Death Cross imminent"
+                    else "🔴 Death Cross imminent"
                 )
 
                 detected.append({
@@ -152,8 +205,18 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
                     "Signal": signal
                 })
 
-            time.sleep(0.05)  # anti-rate-limit Polygon
+            progress.progress((i + 1) / total)
+            time.sleep(0.05)
 
+    # ==================================================
+    # DISCORD GROUPÉ
+    # ==================================================
+    if send_discord_alerts:
+        send_grouped_discord_alert(detected, ma_type, seuil)
+
+    # ==================================================
+    # AFFICHAGE
+    # ==================================================
     if detected:
         df_res = pd.DataFrame(detected).sort_values("Écart (%)")
         st.success(f"{len(df_res)} signaux détectés")
@@ -185,4 +248,4 @@ if st.sidebar.button("🚦 Lancer l'analyse"):
         st.warning("Aucun signal détecté avec ce seuil.")
 
 else:
-    st.info("👈 Configure et lance l’analyse depuis la barre latérale.")
+    st.info("👈 Lance le scanner depuis la barre latérale.")
