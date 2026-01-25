@@ -5,3 +5,4 @@ yfinance
 plotly
 lxml
 openpyxl
+urllib3
