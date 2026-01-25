@@ -8,11 +8,11 @@ import pandas as pd
 # CONFIG STREAMLIT
 # ==================================================
 st.set_page_config(
-    page_title="Price vs SMA Scanner",
+    page_title="SMA50 vs SMA200 – Différence finale",
     layout="wide"
 )
 
-st.title("📏 Distance du PRIX vs SMA 50 & SMA 200 (Russell 3000)")
+st.title("📐 SMA50 / SMA200 – Différence (dernier close)")
 
 API_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
@@ -35,13 +35,8 @@ price_adjustment = st.sidebar.radio(
 polygon_adjusted = "true" if "Ajusté" in price_adjustment else "false"
 
 top_n = st.sidebar.slider(
-    "Top N plus proches",
-    5, 50, 20
-)
-
-reference_ma = st.sidebar.radio(
-    "Référence de proximité",
-    ["SMA50", "SMA200"]
+    "Top N (SMA50 la plus proche de SMA200)",
+    5, 100, 20
 )
 
 send_discord = st.sidebar.checkbox(
@@ -115,16 +110,17 @@ def send_discord(df):
     df.to_csv(csv, index=False)
 
     message = (
-        f"📏 Price vs SMA Scan\n"
-        f"Top {len(df)} – Référence {reference_ma}\n"
+        f"📐 SMA50 vs SMA200 – Différence\n"
         f"Moyennes: {ma_type}\n"
-        f"Données: {'Non ajusté' if polygon_adjusted == 'false' else 'Ajusté'}"
+        f"Données: {'Non ajusté' if polygon_adjusted == 'false' else 'Ajusté'}\n"
+        f"Résultats: {len(df)}\n"
+        f"(Diff < 0 → Golden possible | Diff > 0 → Death possible)"
     )
 
     requests.post(
         DISCORD_WEBHOOK,
         data={"content": message},
-        files={"file": ("price_vs_sma.csv", csv.getvalue())},
+        files={"file": ("sma50_sma200_diff.csv", csv.getvalue())},
         timeout=15
     )
 
@@ -146,44 +142,40 @@ if st.sidebar.button("🚦 Lancer le scan"):
         df = compute_ma(df)
         last = df.iloc[-1]
 
-        close = last["Close"]
         sma50 = last["SMA50"]
         sma200 = last["SMA200"]
 
-        dist_50 = (close - sma50) / sma50 * 100
-        dist_200 = (close - sma200) / sma200 * 100
+        diff_abs = sma50 - sma200
+        diff_pct = diff_abs / sma200 * 100
+
+        interpretation = (
+            "Golden Cross possible"
+            if diff_abs < 0
+            else "Death Cross possible"
+        )
 
         results.append({
             "Ticker": t,
-            "Close": round(close, 2),
             "SMA50": round(sma50, 2),
             "SMA200": round(sma200, 2),
-            "Dist Close → SMA50 (%)": round(dist_50, 3),
-            "Dist Close → SMA200 (%)": round(dist_200, 3)
+            "Diff SMA50 − SMA200": round(diff_abs, 4),
+            "Diff %": round(diff_pct, 3),
+            "Lecture": interpretation
         })
 
         progress.progress((i + 1) / len(tickers))
         time.sleep(0.01)
 
-    df_res = pd.DataFrame(results)
-
-    if reference_ma == "SMA50":
-        df_res = df_res.sort_values(
-            "Dist Close → SMA50 (%)",
-            key=lambda x: x.abs()
-        )
-    else:
-        df_res = df_res.sort_values(
-            "Dist Close → SMA200 (%)",
-            key=lambda x: x.abs()
-        )
-
-    df_res = df_res.head(top_n)
+    df_res = (
+        pd.DataFrame(results)
+        .sort_values("Diff %", key=lambda x: x.abs())
+        .head(top_n)
+    )
 
     if send_discord:
         send_discord(df_res)
 
-    st.success(f"Top {top_n} – distance du PRIX vs {reference_ma}")
+    st.success(f"Top {top_n} – SMA50 la plus proche de SMA200")
     st.dataframe(df_res, use_container_width=True)
 
 else:
