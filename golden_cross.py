@@ -6,18 +6,18 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # =====================================================
-# CONFIG
+# CONFIG GÉNÉRALE
 # =====================================================
 st.set_page_config(layout="wide")
 
 POLYGON_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 
-LOOKBACK = 260                 # ~1 an daily
-SLEEP_BETWEEN_CALLS = 0.15     # safe Polygon Starter
+LOOKBACK = 350                 # IMPORTANT : match TradingView (SMA200)
+SLEEP_BETWEEN_CALLS = 0.15     # Safe pour Polygon Starter
 
 # =====================================================
-# SESSION HTTP ROBUSTE
+# SESSION HTTP ROBUSTE (Polygon + Discord)
 # =====================================================
 def build_session():
     session = requests.Session()
@@ -53,7 +53,7 @@ def load_tickers():
 TICKERS = load_tickers()
 
 # =====================================================
-# POLYGON — AGGS DAILY
+# POLYGON — AGGS DAILY (PRIX AJUSTÉS)
 # =====================================================
 @st.cache_data(ttl=3600)
 def get_data(ticker):
@@ -72,7 +72,7 @@ def get_data(ticker):
             return None
 
         df = pd.DataFrame(data["results"])
-        df["Close"] = df["c"]
+        df["Close"] = df["c"]   # close AJUSTÉ (match TradingView)
         return df
 
     except Exception:
@@ -85,10 +85,11 @@ def sma_proximity(df):
     if len(df) < 200:
         return None
 
-    df["SMA50"] = df["Close"].rolling(50).mean()
-    df["SMA200"] = df["Close"].rolling(200).mean()
+    # SMA STRICTES (match TradingView)
+    df["SMA50"] = df["Close"].rolling(window=50, min_periods=50).mean()
+    df["SMA200"] = df["Close"].rolling(window=200, min_periods=200).mean()
 
-    last = df.iloc[-1]
+    last = df.iloc[-1]  # dernière bougie clôturée (daily)
 
     sma50 = last["SMA50"]
     sma200 = last["SMA200"]
@@ -111,7 +112,7 @@ def sma_proximity(df):
     }
 
 # =====================================================
-# DISCORD
+# DISCORD — ENVOI WEBHOOK
 # =====================================================
 def send_to_discord(rows):
     if not DISCORD_WEBHOOK or not rows:
@@ -120,11 +121,11 @@ def send_to_discord(rows):
     lines = []
     for r in rows[:25]:
         lines.append(
-            f"{r[1]} **{r[0]}** | Δ {r[4]}%"
+            f"{r[1]} **{r[0]}** | SMA50 {r[2]} | SMA200 {r[3]} | Δ {r[4]}%"
         )
 
     message = (
-        "📊 **SMA 50 / SMA 200 — Proximité de cross**\n\n"
+        "📊 **SMA 50 / SMA 200 — Proximité de cross (prix ajustés)**\n\n"
         + "\n".join(lines)
     )
 
@@ -136,9 +137,9 @@ def send_to_discord(rows):
         pass
 
 # =====================================================
-# UI
+# UI STREAMLIT
 # =====================================================
-st.title("📊 SMA 50 / SMA 200 — Distance actuelle (PAS de cross passé)")
+st.title("📊 SMA 50 / SMA 200 — Distance ACTUELLE (aligné TradingView)")
 
 limit = st.slider(
     "Nombre de tickers à analyser",
@@ -185,6 +186,8 @@ if st.button("🚀 Scanner et envoyer sur Discord"):
         st.dataframe(result, width="stretch")
         send_to_discord(rows)
 
-        st.success(f"{len(rows)} tickers proches d’un cross envoyés sur Discord ✅")
+        st.success(
+            f"{len(rows)} tickers proches d’un cross potentiel envoyés sur Discord ✅"
+        )
     else:
         st.info("Aucun ticker proche d’un cross avec les critères actuels.")
