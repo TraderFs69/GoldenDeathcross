@@ -1,17 +1,14 @@
 import streamlit as st
-return {
-"Bias": bias,
-"SMA50": round(sma50, 2),
-"SMA200": round(sma200, 2),
-"Distance (%)": distance_pct
 }
 
 
 # =====================================================
-# DISCORD — ENVOI WEBHOOK
+# DISCORD — ENVOI WEBHOOK (UNE SEULE FOIS)
 # =====================================================
 def send_to_discord(rows):
-if not DISCORD_WEBHOOK or not rows:
+if not DISCORD_WEBHOOK:
+return
+if rows is None or len(rows) == 0:
 return
 
 
