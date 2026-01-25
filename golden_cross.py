@@ -1,162 +1,177 @@
+import os
+import time
+import io
+import requests
 import streamlit as st
 import pandas as pd
-import time
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-# =====================================================
+# ==================================================
 # CONFIG
-# =====================================================
-st.set_page_config(layout="wide")
+# ==================================================
+st.set_page_config(page_title="SMA Proximity Scanner", layout="wide")
+st.title("📏 SMA 50 / SMA 200 – Scanner de proximité (Russell 3000)")
 
-POLYGON_KEY = st.secrets["POLYGON_API_KEY"]
+API_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 
-LOOKBACK = 260                 # ~1 an de données daily
-SLEEP_BETWEEN_CALLS = 0.15     # 150 ms = safe Polygon Starter
+# ==================================================
+# SIDEBAR
+# ==================================================
+st.sidebar.header("Configuration")
 
-# =====================================================
-# SESSION HTTP ROBUSTE (ANTI TIMEOUT)
-# =====================================================
-def build_session():
-    session = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=1.5,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    return session
+seuil = st.sidebar.slider(
+    "Distance max entre SMA50 et SMA200 (%)",
+    0.1, 5.0, 1.0, 0.1
+)
 
-SESSION = build_session()
+ma_type = st.sidebar.selectbox(
+    "Type de moyenne",
+    ["SMA", "EMA"]
+)
 
-# =====================================================
-# LOAD TICKERS (RUSSELL 3000 — COLONNE A = Symbol)
-# =====================================================
+price_adjustment = st.sidebar.radio(
+    "Données de prix",
+    ["Non ajusté (TradingView)", "Ajusté (splits + dividendes)"],
+    index=0
+)
+
+polygon_adjusted = "true" if "Ajusté" in price_adjustment else "false"
+
+send_discord = st.sidebar.checkbox("📣 Discord + CSV", True)
+
+# ==================================================
+# TICKERS
+# ==================================================
 @st.cache_data
-def load_tickers():
-    df = pd.read_excel("russell3000_constituents.xlsx", header=0)
-    tickers = (
-        df.iloc[:, 0]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .unique()
-        .tolist()
-    )
-    return [t for t in tickers if t != "SYMBOL"]
+def get_tickers():
+    df = pd.read_excel("russell3000_constituents.xlsx")
+    for col in df.columns:
+        if col.lower() in ["ticker", "symbol"]:
+            return (
+                df[col]
+                .astype(str)
+                .str.upper()
+                .str.replace(".", "-", regex=False)
+                .dropna()
+                .unique()
+                .tolist()
+            )
+    return []
 
-TICKERS = load_tickers()
-
-# =====================================================
-# POLYGON — AGGS DAILY (ROBUSTE)
-# =====================================================
+# ==================================================
+# DATA
+# ==================================================
 @st.cache_data(ttl=3600)
 def get_data(ticker):
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/"
-        f"{LOOKBACK}/2025-01-01"
-        f"?adjusted=true&sort=asc&apiKey={POLYGON_KEY}"
+        f"2023-01-01/2026-01-01"
+        f"?adjusted={polygon_adjusted}&sort=asc&limit=50000&apiKey={API_KEY}"
     )
-    try:
-        r = SESSION.get(url, timeout=10)
-        if r.status_code != 200 or not r.text or r.text[0] != "{":
-            return None
 
-        data = r.json()
-        if "results" not in data or not data["results"]:
-            return None
-
-        df = pd.DataFrame(data["results"])
-        df["Close"] = df["c"]
-        return df
-
-    except requests.exceptions.ReadTimeout:
-        return None
-    except Exception:
+    r = requests.get(url, timeout=15)
+    if r.status_code != 200:
         return None
 
-# =====================================================
-# STRATÉGIE — GOLDEN / DEATH CROSS
-# =====================================================
-def detect_cross(df):
-    if len(df) < 200:
+    data = r.json().get("results")
+    if not data:
         return None
 
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["EMA200"] = df["Close"].ewm(span=200).mean()
+    df = pd.DataFrame(data)
+    df["Date"] = pd.to_datetime(df["t"], unit="ms")
+    df.set_index("Date", inplace=True)
+    df.rename(columns={"c": "Close"}, inplace=True)
 
-    prev = df.iloc[-2]
-    last = df.iloc[-1]
+    return df[["Close"]]
 
-    if prev["EMA50"] < prev["EMA200"] and last["EMA50"] > last["EMA200"]:
-        return "🟢 Golden Cross"
+# ==================================================
+# MOYENNES
+# ==================================================
+def compute_ma(df):
+    if ma_type == "SMA":
+        df["MA50"] = df["Close"].rolling(50).mean()
+        df["MA200"] = df["Close"].rolling(200).mean()
+    else:
+        df["MA50"] = df["Close"].ewm(span=50).mean()
+        df["MA200"] = df["Close"].ewm(span=200).mean()
 
-    if prev["EMA50"] > prev["EMA200"] and last["EMA50"] < last["EMA200"]:
-        return "🔴 Death Cross"
+    return df.dropna()
 
-    return None
-
-# =====================================================
-# DISCORD — ENVOI WEBHOOK
-# =====================================================
-def send_to_discord(rows):
-    if not DISCORD_WEBHOOK or not rows:
+# ==================================================
+# DISCORD
+# ==================================================
+def send_discord(results):
+    if not results:
         return
 
-    lines = []
-    for ticker, signal in rows:
-        lines.append(f"{signal} **{ticker}**")
+    df = pd.DataFrame(results)
+    csv = io.StringIO()
+    df.to_csv(csv, index=False)
 
-    message = (
-        "🚨 **Golden / Death Cross détecté**\n\n"
-        + "\n".join(lines[:25])
+    payload = {
+        "content": (
+            f"📏 SMA Proximity Scan terminé\n"
+            f"Seuil: {seuil}%\n"
+            f"Résultats: {len(df)}\n"
+            f"CSV joint"
+        )
+    }
+
+    requests.post(
+        DISCORD_WEBHOOK,
+        data=payload,
+        files={"file": ("sma_proximity.csv", csv.getvalue())},
+        timeout=15
     )
 
-    payload = {"content": message[:1900]}
+# ==================================================
+# MAIN
+# ==================================================
+if st.sidebar.button("🚦 Lancer le scan"):
 
-    try:
-        SESSION.post(DISCORD_WEBHOOK, json=payload, timeout=5)
-    except Exception:
-        pass
+    tickers = get_tickers()
+    results = []
+    progress = st.progress(0)
 
-# =====================================================
-# UI
-# =====================================================
-st.title("📈 Golden / Death Cross — Polygon (Version Stable + Discord)")
+    for i, t in enumerate(tickers):
 
-limit = st.slider(
-    "Nombre de tickers à analyser",
-    min_value=50,
-    max_value=len(TICKERS),
-    value=300
-)
+        df = get_data(t)
+        if df is None or len(df) < 200:
+            continue
 
-if st.button("🚀 Scanner et envoyer sur Discord"):
-    rows = []
+        df = compute_ma(df)
+        last = df.iloc[-1]
 
-    with st.spinner("Scan en cours…"):
-        for t in TICKERS[:limit]:
-            df = get_data(t)
-            time.sleep(SLEEP_BETWEEN_CALLS)   # ⬅️ protection API
+        ma50 = last["MA50"]
+        ma200 = last["MA200"]
 
-            if df is None:
-                continue
+        distance_pct = abs(ma50 - ma200) / ma200 * 100
 
-            signal = detect_cross(df)
-            if signal:
-                rows.append([t, signal])
+        if distance_pct <= seuil:
+            biais = (
+                "Biais haussier (SMA50 < SMA200)"
+                if ma50 < ma200
+                else "Biais baissier (SMA50 > SMA200)"
+            )
 
-    if rows:
-        result = pd.DataFrame(rows, columns=["Ticker", "Signal"])
-        st.dataframe(result, width="stretch")
+            results.append({
+                "Ticker": t,
+                "Prix": round(last["Close"], 2),
+                "MA50": round(ma50, 2),
+                "MA200": round(ma200, 2),
+                "Distance %": round(distance_pct, 3),
+                "Biais": biais
+            })
 
-        send_to_discord(rows)   # ⬅️ ENVOI DISCORD
+        progress.progress((i + 1) / len(tickers))
+        time.sleep(0.02)
 
-        st.success(f"{len(rows)} signaux détectés et envoyés sur Discord ✅")
+    if send_discord:
+        send_discord(results)
+
+    if results:
+        df_res = pd.DataFrame(results).sort_values("Distance %")
+        st.success(f"{len(df_res)} actions avec SMA proches")
+        st.dataframe(df_res, use_container_width=True)
     else:
-        st.info("Aucun signal détecté.")
+        st.warning("Aucune action avec SMA proches selon ce seuil.")
