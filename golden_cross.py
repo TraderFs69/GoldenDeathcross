@@ -7,12 +7,8 @@ import pandas as pd
 # ==================================================
 # CONFIG STREAMLIT
 # ==================================================
-st.set_page_config(
-    page_title="SMA50 vs SMA200 – Dernier close",
-    layout="wide"
-)
-
-st.title("📐 SMA50 & SMA200 AU DERNIER CLOSE (pas au croisement)")
+st.set_page_config(page_title="SMA50 vs SMA200 – Dernier close", layout="wide")
+st.title("📐 Différence SMA50 − SMA200 (dernier close réel)")
 
 API_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
@@ -21,6 +17,7 @@ DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 # SIDEBAR
 # ==================================================
 ma_type = st.sidebar.selectbox("Type de moyenne", ["SMA", "EMA"])
+top_n = st.sidebar.slider("Top N à afficher", 10, 100, 20)
 send_discord = st.sidebar.checkbox("📣 Envoyer Discord + CSV", True)
 
 # ==================================================
@@ -52,11 +49,9 @@ def get_data(ticker):
         f"2022-01-01/2026-01-01"
         f"?adjusted=false&sort=asc&limit=50000&apiKey={API_KEY}"
     )
-
     r = requests.get(url, timeout=15)
     if r.status_code != 200:
         return None
-
     data = r.json().get("results")
     if not data:
         return None
@@ -65,7 +60,6 @@ def get_data(ticker):
     df["Date"] = pd.to_datetime(df["t"], unit="ms")
     df.set_index("Date", inplace=True)
     df.rename(columns={"c": "Close"}, inplace=True)
-
     return df[["Close"]]
 
 # ==================================================
@@ -78,7 +72,6 @@ def compute_ma(df):
     else:
         df["SMA50"] = df["Close"].ewm(span=50, min_periods=50).mean()
         df["SMA200"] = df["Close"].ewm(span=200, min_periods=200).mean()
-
     return df
 
 # ==================================================
@@ -89,15 +82,15 @@ def send_discord(df):
     df.to_csv(csv, index=False)
 
     message = (
-        f"📐 SMA50 vs SMA200 – DERNIER CLOSE\n"
-        f"(Diff < 0 → Golden possible | Diff > 0 → Death possible)\n"
-        f"Résultats: {len(df)}"
+        f"📐 SMA50 − SMA200 (dernier close)\n"
+        f"Résultats envoyés: {len(df)}\n"
+        f"Diff < 0 → Golden possible | Diff > 0 → Death possible"
     )
 
     requests.post(
         DISCORD_WEBHOOK,
         data={"content": message},
-        files={"file": ("sma_last_close.csv", csv.getvalue())},
+        files={"file": ("sma50_sma200_diff.csv", csv.getvalue())},
         timeout=15
     )
 
@@ -114,15 +107,15 @@ if st.sidebar.button("🚦 Lancer le scan"):
 
         df = get_data(t)
         if df is None or len(df) < 200:
+            progress.progress((i + 1) / len(tickers))
             continue
 
         df = compute_ma(df)
-
-        # 🔴 ON PREND EXPLICITEMENT LE DERNIER CLOSE
         last = df.iloc[-1]
 
-        # sécurité
-        if pd.isna(last["SMA50"]) or pd.isna(last["SMA200"]):
+        # ⚠️ On saute seulement si SMA200 n'existe pas
+        if pd.isna(last["SMA200"]) or pd.isna(last["SMA50"]):
+            progress.progress((i + 1) / len(tickers))
             continue
 
         sma50 = last["SMA50"]
@@ -137,26 +130,26 @@ if st.sidebar.button("🚦 Lancer le scan"):
             "SMA200": round(sma200, 2),
             "Diff SMA50 − SMA200": round(diff, 4),
             "Diff %": round(diff_pct, 3),
-            "Lecture": (
-                "Golden Cross possible"
-                if diff < 0
-                else "Death Cross possible"
-            )
+            "Lecture": "Golden possible" if diff < 0 else "Death possible"
         })
 
         progress.progress((i + 1) / len(tickers))
-        time.sleep(0.005)
+        time.sleep(0.003)
 
     df_res = (
         pd.DataFrame(results)
         .sort_values("Diff %", key=lambda x: x.abs())
-        .head(20)
+        .head(top_n)
     )
+
+    if df_res.empty:
+        st.error("❌ Aucun ticker valide – problème de données Polygon")
+        st.stop()
 
     if send_discord:
         send_discord(df_res)
 
-    st.success("Top 20 – SMA50 la plus proche de SMA200 (AUJOURD’HUI)")
+    st.success(f"Top {top_n} – SMA50 la plus proche de SMA200 (AUJOURD’HUI)")
     st.dataframe(df_res, use_container_width=True)
 
 else:
