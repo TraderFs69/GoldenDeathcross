@@ -13,8 +13,7 @@ st.set_page_config(layout="wide")
 POLYGON_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 
-LOOKBACK = 350                 # nécessaire pour SMA200 (match TradingView)
-SLEEP_BETWEEN_CALLS = 0.15     # safe Polygon Starter
+SLEEP_BETWEEN_CALLS = 0.2   # IMPORTANT : 2 SMA / ticker (Starter safe)
 
 # =====================================================
 # SESSION HTTP ROBUSTE
@@ -53,70 +52,41 @@ def load_tickers():
 TICKERS = load_tickers()
 
 # =====================================================
-# POLYGON — AGGS DAILY (PRIX AJUSTÉS)
+# POLYGON — SMA OFFICIELLES
 # =====================================================
-@st.cache_data(ttl=3600)
-def get_data(ticker):
+@st.cache_data(ttl=900)
+def get_polygon_sma(ticker, window):
     url = (
-        f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/"
-        f"{LOOKBACK}/2025-01-01"
-        f"?adjusted=true&sort=asc&apiKey={POLYGON_KEY}"
+        f"https://api.polygon.io/v1/indicators/sma/{ticker}"
+        f"?timespan=day"
+        f"&window={window}"
+        f"&series_type=close"
+        f"&adjusted=true"
+        f"&order=desc"
+        f"&limit=1"
+        f"&apiKey={POLYGON_KEY}"
     )
+
     try:
         r = SESSION.get(url, timeout=10)
-        if r.status_code != 200 or not r.text or r.text[0] != "{":
+        if r.status_code != 200:
             return None
 
         data = r.json()
-        if "results" not in data or not data["results"]:
+        values = data.get("results", {}).get("values", [])
+        if not values:
             return None
 
-        df = pd.DataFrame(data["results"])
-        df["Close"] = df["c"]   # close ajusté (TradingView ON)
-        return df
+        return round(values[0]["value"], 2)
 
     except Exception:
         return None
 
 # =====================================================
-# LOGIQUE SMA — DISTANCE ACTUELLE
-# =====================================================
-def sma_proximity(df):
-    if len(df) < 200:
-        return None
-
-    df["SMA50"] = df["Close"].rolling(window=50, min_periods=50).mean()
-    df["SMA200"] = df["Close"].rolling(window=200, min_periods=200).mean()
-
-    last = df.iloc[-1]
-
-    sma50 = last["SMA50"]
-    sma200 = last["SMA200"]
-
-    if pd.isna(sma50) or pd.isna(sma200):
-        return None
-
-    distance_pct = round((sma50 - sma200) / sma200 * 100, 2)
-
-    if sma50 < sma200:
-        bias = "🟡 Golden Cross POTENTIEL"
-    else:
-        bias = "🔴 Death Cross POTENTIEL"
-
-    return {
-        "Bias": bias,
-        "SMA50": round(sma50, 2),
-        "SMA200": round(sma200, 2),
-        "Distance (%)": distance_pct
-    }
-
-# =====================================================
-# DISCORD — ENVOI WEBHOOK (UNE SEULE FOIS)
+# DISCORD — ENVOI WEBHOOK
 # =====================================================
 def send_to_discord(rows):
-    if not DISCORD_WEBHOOK:
-        return
-    if rows is None or len(rows) == 0:
+    if not DISCORD_WEBHOOK or not rows:
         return
 
     lines = []
@@ -126,7 +96,7 @@ def send_to_discord(rows):
         )
 
     message = (
-        "📊 **SMA 50 / SMA 200 — Proximité de cross (prix ajustés)**\n\n"
+        "📊 **SMA 50 / SMA 200 — Proximité de cross (Polygon Indicators)**\n\n"
         + "\n".join(lines)
     )
 
@@ -140,13 +110,13 @@ def send_to_discord(rows):
 # =====================================================
 # UI STREAMLIT
 # =====================================================
-st.title("📊 SMA 50 / SMA 200 — Distance ACTUELLE (aligné TradingView)")
+st.title("📊 SMA 50 / SMA 200 — Distance ACTUELLE (Polygon Indicators)")
 
 limit = st.slider(
     "Nombre de tickers à analyser",
-    min_value=50,
+    min_value=25,
     max_value=len(TICKERS),
-    value=300
+    value=150
 )
 
 threshold = st.slider(
@@ -159,21 +129,32 @@ if st.button("🚀 Scanner et envoyer sur Discord"):
 
     with st.spinner("Scan en cours…"):
         for t in TICKERS[:limit]:
-            df = get_data(t)
+            sma50 = get_polygon_sma(t, 50)
             time.sleep(SLEEP_BETWEEN_CALLS)
 
-            if df is None:
+            sma200 = get_polygon_sma(t, 200)
+            time.sleep(SLEEP_BETWEEN_CALLS)
+
+            if sma50 is None or sma200 is None:
                 continue
 
-            info = sma_proximity(df)
-            if info and abs(info["Distance (%)"]) <= threshold:
-                rows.append([
-                    t,
-                    info["Bias"],
-                    info["SMA50"],
-                    info["SMA200"],
-                    info["Distance (%)"]
-                ])
+            distance_pct = round((sma50 - sma200) / sma200 * 100, 2)
+
+            if abs(distance_pct) > threshold:
+                continue
+
+            if sma50 < sma200:
+                bias = "🟡 Golden Cross POTENTIEL"
+            else:
+                bias = "🔴 Death Cross POTENTIEL"
+
+            rows.append([
+                t,
+                bias,
+                sma50,
+                sma200,
+                distance_pct
+            ])
 
     if rows:
         result = (
