@@ -1,10 +1,4 @@
 import streamlit as st
-if sma50 < sma200:
-bias = "🟡 Golden Cross POTENTIEL"
-else:
-bias = "🔴 Death Cross POTENTIEL"
-
-
 return {
 "Bias": bias,
 "SMA50": round(sma50, 2),
