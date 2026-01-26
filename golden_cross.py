@@ -5,7 +5,6 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from io import StringIO
-import json
 
 # =====================================================
 # CONFIG
@@ -54,7 +53,7 @@ def load_tickers():
 TICKERS = load_tickers()
 
 # =====================================================
-# POLYGON — SMA OFFICIELLES
+# POLYGON — INDICATEURS
 # =====================================================
 @st.cache_data(ttl=900)
 def get_polygon_sma(ticker, window):
@@ -93,26 +92,29 @@ def compute_score(distance_pct, slope, is_golden):
     return round(min(100, max(0, score)), 1)
 
 # =====================================================
-# DISCORD — MESSAGE + CSV (CORRECT)
+# DISCORD — ENVOI TEXTE
 # =====================================================
-def send_to_discord(df):
-    if df.empty or not DISCORD_WEBHOOK:
+def send_message_to_discord(message: str):
+    if not DISCORD_WEBHOOK:
         return
 
-    # -------- Message texte --------
-    lines = []
-    for _, r in df.head(10).iterrows():
-        icon = "🟢" if "Golden" in r["Signal"] else "🔴"
-        lines.append(
-            f"{icon} **{r['Ticker']}** | {r['Price']}$ | Δ {r['Distance (%)']}% | Score {r['Score']}"
-        )
+    payload = {"content": message[:1900]}
 
-    message = (
-        "📊 **Golden / Death Cross — Projection & Probabilité**\n\n"
-        + "\n".join(lines)
+    r = SESSION.post(
+        DISCORD_WEBHOOK,
+        json=payload,
+        timeout=10
     )
 
-    # -------- CSV --------
+    st.write("Discord message status:", r.status_code)
+
+# =====================================================
+# DISCORD — ENVOI CSV
+# =====================================================
+def send_csv_to_discord(df: pd.DataFrame):
+    if not DISCORD_WEBHOOK or df.empty:
+        return
+
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)
@@ -121,20 +123,13 @@ def send_to_discord(df):
         "file": ("cross_scanner.csv", csv_buffer.getvalue(), "text/csv")
     }
 
-    payload = {
-        "payload_json": json.dumps({
-            "content": message[:1800]
-        })
-    }
-
     r = SESSION.post(
         DISCORD_WEBHOOK,
-        data=payload,
         files=files,
         timeout=15
     )
 
-    st.write("Discord status:", r.status_code)
+    st.write("Discord CSV status:", r.status_code)
 
 # =====================================================
 # UI
@@ -197,7 +192,22 @@ if st.button("🚀 Scanner & envoyer sur Discord"):
         ).sort_values("Score", ascending=False)
 
         st.dataframe(df, width="stretch")
-        send_to_discord(df)
+
+        # -------- message --------
+        lines = []
+        for _, r in df.head(10).iterrows():
+            icon = "🟢" if "Golden" in r["Signal"] else "🔴"
+            lines.append(
+                f"{icon} **{r['Ticker']}** | {r['Price']}$ | Δ {r['Distance (%)']}% | Score {r['Score']}"
+            )
+
+        message = (
+            "📊 **Golden / Death Cross — Projection & Probabilité**\n\n"
+            + "\n".join(lines)
+        )
+
+        send_message_to_discord(message)
+        send_csv_to_discord(df)
 
         st.success(f"{len(df)} setups envoyés sur Discord ✅")
     else:
