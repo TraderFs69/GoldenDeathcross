@@ -14,7 +14,7 @@ st.set_page_config(layout="wide")
 POLYGON_KEY = st.secrets["POLYGON_API_KEY"]
 DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
 
-SLEEP_BETWEEN_CALLS = 0.25  # Polygon Starter safe
+SLEEP_BETWEEN_CALLS = 0.25  # safe Polygon Starter
 
 # =====================================================
 # SESSION HTTP ROBUSTE
@@ -34,7 +34,7 @@ def build_session():
 SESSION = build_session()
 
 # =====================================================
-# LOAD TICKERS (COLONNE A = Symbol)
+# LOAD TICKERS
 # =====================================================
 @st.cache_data
 def load_tickers():
@@ -53,7 +53,7 @@ def load_tickers():
 TICKERS = load_tickers()
 
 # =====================================================
-# POLYGON — INDICATEURS
+# POLYGON INDICATORS
 # =====================================================
 @st.cache_data(ttl=900)
 def get_polygon_sma(ticker, window):
@@ -92,29 +92,17 @@ def compute_score(distance_pct, slope, is_golden):
     return round(min(100, max(0, score)), 1)
 
 # =====================================================
-# DISCORD — ENVOI TEXTE
+# DISCORD — TEXTE
 # =====================================================
 def send_message_to_discord(message: str):
-    if not DISCORD_WEBHOOK:
-        return
-
     payload = {"content": message[:1900]}
-
-    r = SESSION.post(
-        DISCORD_WEBHOOK,
-        json=payload,
-        timeout=10
-    )
-
-    st.write("Discord message status:", r.status_code)
+    r = SESSION.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+    st.write("Discord TEXT status:", r.status_code)
 
 # =====================================================
-# DISCORD — ENVOI CSV
+# DISCORD — CSV
 # =====================================================
 def send_csv_to_discord(df: pd.DataFrame):
-    if not DISCORD_WEBHOOK or df.empty:
-        return
-
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)
@@ -123,12 +111,7 @@ def send_csv_to_discord(df: pd.DataFrame):
         "file": ("cross_scanner.csv", csv_buffer.getvalue(), "text/csv")
     }
 
-    r = SESSION.post(
-        DISCORD_WEBHOOK,
-        files=files,
-        timeout=15
-    )
-
+    r = SESSION.post(DISCORD_WEBHOOK, files=files, timeout=15)
     st.write("Discord CSV status:", r.status_code)
 
 # =====================================================
@@ -139,6 +122,11 @@ st.title("📊 Golden / Death Cross — Projection & Score (Polygon)")
 limit = st.slider("Nombre de tickers analysés", 25, len(TICKERS), 150)
 threshold = st.slider("Distance max SMA (%)", 0.1, 5.0, 1.0, 0.1)
 
+# -------- TEST DISCORD --------
+if st.button("🧪 Test Discord"):
+    send_message_to_discord("🧪 Test Discord — webhook OK")
+
+# -------- SCAN --------
 if st.button("🚀 Scanner & envoyer sur Discord"):
     rows = []
 
@@ -193,7 +181,7 @@ if st.button("🚀 Scanner & envoyer sur Discord"):
 
         st.dataframe(df, width="stretch")
 
-        # -------- message --------
+        # -------- MESSAGE --------
         lines = []
         for _, r in df.head(10).iterrows():
             icon = "🟢" if "Golden" in r["Signal"] else "🔴"
@@ -207,6 +195,7 @@ if st.button("🚀 Scanner & envoyer sur Discord"):
         )
 
         send_message_to_discord(message)
+        time.sleep(1)  # ⬅️ IMPORTANT
         send_csv_to_discord(df)
 
         st.success(f"{len(df)} setups envoyés sur Discord ✅")
