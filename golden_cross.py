@@ -12,7 +12,7 @@ from io import StringIO
 st.set_page_config(layout="wide")
 
 POLYGON_KEY = st.secrets["POLYGON_API_KEY"]
-DISCORD_WEBHOOK = st.secrets["DISCORD_WEBHOOK_URL"]
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464705986324463791/lgI4CUb99jFo7fYl09C7GmzEH8pS242B5h5n2fqo_ugzm7X703d1QTiV64l_kRxCaCEA"
 
 SLEEP_BETWEEN_CALLS = 0.25  # safe Polygon Starter
 
