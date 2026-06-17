@@ -18,7 +18,7 @@ SLEEP = 0.25
 BATCH_SIZE = 15
 HEARTBEAT_EVERY = 25
 
-LIMIT = 200
+LIMIT = len(tickers)
 THRESHOLD = 1.0
 
 # =====================================================
